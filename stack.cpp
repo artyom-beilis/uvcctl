@@ -1,15 +1,28 @@
+#include "stack.h"
 #include <opencv2/core.hpp>
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOG(format, ...) __android_log_print(ANDROID_LOG_ERROR, "UVC", "[%s:%d/%s] " format "\n", basename(__FILE__), __LINE__, __FUNCTION__, ##__VA_ARGS__)
+#else
+#define LOG(format, ...) fprintf(stderr,"[%s:%d/%s] " format "\n", basename(__FILE__), __LINE__, __FUNCTION__, ##__VA_ARGS__)
+#endif
+
+#ifdef INCLUDE_MAIN
+#ifdef DO_STACK
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
+#endif
 #include <fstream>
-#include "stack.h"
+#endif
 
 struct Stacker {
 public:
+
     Stacker(int width,int height,int roi_x=-1,int roi_y=-1,int roi_size = -1) : 
         frames_(0),
         has_darks_(false)
     {
+        error_message_[0]=0;
         if(roi_size == -1) {
             window_size_ = std::min(height,width);
             for(int i=0;i<16;i++) {
@@ -33,8 +46,8 @@ public:
             dy_ = std::min(height-window_size_,dy_);
         }
         
-        sum_ = cv::Mat(height,width,CV_16UC3);
-        count_ = cv::Mat(height,width,CV_16UC3);
+        sum_ = cv::Mat(height,width,CV_32FC3);
+        count_ = cv::Mat(height,width,CV_32FC3);
     }
 
     void set_darks(unsigned char *rgb_img)
@@ -133,13 +146,12 @@ private:
     {
         int dx = shift.x;
         int dy = shift.y;
-        printf("Adding with shift %d,%d\n",dx,dy);
         int width  = (sum_.cols - std::abs(dx));
         int height = (sum_.rows - std::abs(dy));
         cv::Rect src_rect = cv::Rect(std::max(dx,0),std::max(dy,0),width,height);
         cv::Rect img_rect = cv::Rect(std::max(-dx,0),std::max(-dy,0),width,height);
         cv::Mat(sum_,src_rect) += cv::Mat(img,img_rect);
-        cv::Mat(count_,src_rect) += cv::Vec3b(1,1,1);
+        cv::Mat(count_,src_rect) += cv::Scalar(1,1,1);
     }
     int frames_;
     bool has_darks_;
@@ -148,8 +160,13 @@ private:
     cv::Mat count_;
     cv::Mat fft_roi_;
     int dx_,dy_,window_size_;
+public:
+    static char error_message_[256];
 };
 
+char Stacker::error_message_[256];
+
+#ifdef INCLUDE_MAIN
 
 void test()
 {
@@ -187,6 +204,7 @@ void test()
 
 }
 
+
 void make_darks(std::vector<cv::Mat> &pictures,std::vector<unsigned char> &data,int H,int W)
 {
     int N=pictures.size();
@@ -199,6 +217,8 @@ void make_darks(std::vector<cv::Mat> &pictures,std::vector<unsigned char> &data,
         }
     }
 }
+
+#ifdef DO_STACK
 
 int main(int argc,char **argv)
 {
@@ -231,14 +251,30 @@ int main(int argc,char **argv)
     }
 }
 
+#else
+
+int main()
+{
+    test();
+    return 0;
+}
+
+#endif
+#endif
 
 extern "C" {
     Stacker *stacker_new(int w,int h,int roi_x,int roi_y,int roi_size)
     {
         try {
+            LOG("Creating stacker of size %d,%d roi=%d",w,h,roi_size);
             return new Stacker(w,h,roi_x,roi_y,roi_size);
         }
+        catch(std::exception const &e) {
+            snprintf(Stacker::error_message_,sizeof(Stacker::error_message_),"Failed to create stacker %s",e.what());
+            return 0;
+        }
         catch(...) {
+            snprintf(Stacker::error_message_,sizeof(Stacker::error_message_),"Unknown exceptiopn");
             return 0;
         }
     }
@@ -246,29 +282,43 @@ extern "C" {
     {
         delete obj;
     }
-    void stacker_set_darks(Stacker *obj,unsigned char *rgb)
+    int stacker_set_darks(Stacker *obj,unsigned char *rgb)
     {
         try {
             obj->set_darks(rgb);
         }
-        catch(...) {
-            abort();
+        catch(std::exception const &e) {
+            snprintf(obj->error_message_,sizeof(obj->error_message_),"Failed: %s",e.what());
+            return -1;
         }
+        catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
+        return 0;
     }
     int stacker_stack_image(Stacker *obj,unsigned char *rgb,int restart)
     {
         try {
             return obj->stack_image(rgb,restart);
         }
-        catch(...) { abort(); }
+        catch(std::exception const &e) {
+            snprintf(obj->error_message_,sizeof(obj->error_message_),"Failed: %s",e.what());
+            return -1;
+        }
+        catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
     }
-    void stacker_get_stacked(Stacker *obj,unsigned char *rgb)
+    int stacker_get_stacked(Stacker *obj,unsigned char *rgb)
     {
         try {
             obj->get_stacked(rgb);
         }
-        catch(...) {
-            abort();
+        catch(std::exception const &e) {
+            snprintf(obj->error_message_,sizeof(obj->error_message_),"Failed: %s",e.what());
+            return -1;
         }
+        catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
+        return 0;
+    }
+    char const *stacker_error()
+    {
+        return Stacker::error_message_;
     }
 }
