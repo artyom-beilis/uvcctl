@@ -1,5 +1,6 @@
 #include "stack.h"
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 #ifdef __ANDROID__
 #include <android/log.h>
 #define LOG(format, ...) __android_log_print(ANDROID_LOG_ERROR, "UVC", "[%s:%d/%s] " format "\n", basename(__FILE__), __LINE__, __FUNCTION__, ##__VA_ARGS__)
@@ -9,7 +10,6 @@
 
 #ifdef INCLUDE_MAIN
 #ifdef DO_STACK
-#include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #endif
 #include <fstream>

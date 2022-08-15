@@ -6,6 +6,7 @@ include_directories(${UVC_INC})
 link_directories(${UVC_LIB})
 
 include_directories(${OPENCV}/modules/core/include)
+include_directories(${OPENCV}/modules/imgproc/include)
 include_directories(${OPENCV}/build_android_${ANDROID_ABI})
 #link_directories(${OPENCV}/sdk/native/staticlibs/${ANDROID_ABI})
 link_directories(${OPENCV}/build_android_${ANDROID_ABI}/lib/${ANDROID_ABI}/)
@@ -17,7 +18,7 @@ add_library(uvcctl SHARED
 target_link_libraries(uvcctl usb1.0 uvc)
 
 add_library(stack SHARED stack.cpp)
-target_link_libraries(stack opencv_core log)
+target_link_libraries(stack opencv_core opencv_imgproc log)
 
 install(TARGETS uvcctl stack
         LIBRARY DESTINATION ${ANDROID_ABI}
