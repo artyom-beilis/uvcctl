@@ -79,11 +79,21 @@ int uvcctl_open(uvcctl *obj,int fd,int *sizes,int n)
         snprintf(obj->error,ERROR_SIZE,"Failed to init UVC Context %s",uvc_strerror(res));
         return -1;
     }
-    res = uvc_wrap(fd,obj->ctx,&obj->devh);
-    if(res < 0 || obj->devh == NULL) {
-        snprintf(obj->error,ERROR_SIZE,"Failed to Wrap Existing FD %s",uvc_strerror(res));
-        return -1;
-    } 
+    for(int tr=0;;tr++) {
+        res = uvc_wrap(fd,obj->ctx,&obj->devh);
+        if(res < 0 || obj->devh == NULL) {
+            if(tr >= 0) {
+                snprintf(obj->error,ERROR_SIZE,"Failed to Wrap Existing FD %s",uvc_strerror(res));
+                return -1;
+            }
+            else {
+                continue;
+            }
+        } 
+        else {
+            break;
+        }
+    }
     const uvc_format_desc_t *format_desc = uvc_get_format_descs(obj->devh);
     for(;format_desc;format_desc=format_desc->next) {
         if(format_desc->bDescriptorSubtype != UVC_VS_FORMAT_MJPEG && format_desc->bDescriptorSubtype != UVC_VS_FORMAT_UNCOMPRESSED)

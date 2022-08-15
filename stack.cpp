@@ -25,12 +25,14 @@ public:
         error_message_[0]=0;
         if(roi_size == -1) {
             window_size_ = std::min(height,width);
+            #if 0
             for(int i=0;i<16;i++) {
                 if((1<<i)<=window_size_ && (1<<(i+1)) > window_size_) {
                     window_size_ = 1<<i;
                     break;
                 }
             }
+            #endif
         }
         else {
             window_size_ = roi_size;
@@ -48,6 +50,26 @@ public:
         
         sum_ = cv::Mat(height,width,CV_32FC3);
         count_ = cv::Mat(height,width,CV_32FC3);
+        make_fft_blur();
+    }
+
+    void make_fft_blur()
+    {
+        if(window_size_ == 0)
+            return;
+        fft_kern_ = cv::Mat(window_size_,window_size_,CV_32FC2);
+        int rad = (window_size_/16);
+        for(int r=0;r<window_size_;r++) {
+            for(int c=0;c<window_size_;c++) {
+                int dy = fft_pos(r);
+                int dx = fft_pos(c);
+                std::complex<float> val = 1;
+                if(dx*dx+dy*dy > rad*rad) {
+                    val = 0;
+                }
+                fft_kern_.at<std::complex<float> >(r,c) = val;
+            }
+        }
     }
 
     void set_darks(unsigned char *rgb_img)
@@ -125,9 +147,20 @@ private:
     {
         cv::Mat res,shift;
         cv::mulSpectrums(fft_roi_,dft,res,0,true);
-        cv::idft(res,shift);
+        cv::idft(res,shift,cv::DFT_REAL_OUTPUT);
         cv::Point pos;
+#ifdef DEBUG
+        double minv,maxv;
+        cv::minMaxLoc(shift,&minv,&maxv,nullptr,&pos);
+        printf("%f %f %d %d\n",minv,maxv,pos.x,pos.y);
+        static int n=1;
+        cv::Mat a,b;
+        a=255*(shift-minv)/(maxv-minv);
+        a.convertTo(b,CV_8UC1);
+        cv::imwrite(std::to_string(n++) + "_shift.png",b);
+#else
         cv::minMaxLoc(shift,nullptr,nullptr,nullptr,&pos);
+#endif        
         return cv::Point(fft_pos(pos.x),fft_pos(pos.y));
     }
 
@@ -137,15 +170,30 @@ private:
         cv::Mat roi = cv::Mat(frame,cv::Rect(dx_,dy_,window_size_,window_size_));
         cv::split(roi,rgb);
         rgb[1].convertTo(gray,CV_32FC1);
-        cv::dft(gray,dft);
-        dft = dft / cv::abs(dft);
-        return dft;
+        cv::dft(gray,dft,cv::DFT_COMPLEX_OUTPUT);
+        cv::mulSpectrums(dft,fft_kern_,dft,0);
+#ifdef DEBUG
+        {
+            cv::idft(dft,gray,cv::DFT_REAL_OUTPUT);
+            double minv,maxv;
+            cv::minMaxLoc(gray,&minv,&maxv);
+            printf("after blur: %f %f\n",minv,maxv);
+            gray = (gray - minv)/(maxv-minv)*255;
+            cv::Mat tmp;
+            gray.convertTo(tmp,CV_8UC1);
+            static int n=1;
+            cv::imwrite(std::to_string(n++) + "_b.png",tmp);
+        }
+#endif        
+
+        return dft / cv::abs(dft);
     }
 
     void add_image(cv::Mat img,cv::Point shift)
     {
         int dx = shift.x;
         int dy = shift.y;
+        printf("Adding at %d %d\n",dx,dy);
         int width  = (sum_.cols - std::abs(dx));
         int height = (sum_.rows - std::abs(dy));
         cv::Rect src_rect = cv::Rect(std::max(dx,0),std::max(dy,0),width,height);
@@ -158,6 +206,7 @@ private:
     cv::Mat sum_;
     cv::Mat darks_;
     cv::Mat count_;
+    cv::Mat fft_kern_;
     cv::Mat fft_roi_;
     int dx_,dy_,window_size_;
 public:
@@ -233,9 +282,14 @@ int main(int argc,char **argv)
         int H=pictures.at(0).rows;
         int W=pictures.at(0).cols;
         Stacker stacker(W,H);
-        std::vector<unsigned char> darks(H*W*3);
+        /*std::vector<unsigned char> darks(H*W*3);
         make_darks(pictures,darks,W,H);
         stacker.set_darks(darks.data());
+        {
+            std::ofstream tmp("darks.ppm");
+            tmp<<"P6\n"<<W<<" " << H << " 255\n";
+            tmp.write((char*)darks.data(),3*H*W);
+        }*/
         for(unsigned i=0;i<pictures.size();i++) {
             if(pictures[i].rows != H || pictures[i].cols != W) {
                 printf("Skipping %d\n",i);
