@@ -147,7 +147,9 @@ private:
     {
         cv::Mat res,shift;
         cv::mulSpectrums(fft_roi_,dft,res,0,true);
-        cv::idft(res,shift,cv::DFT_REAL_OUTPUT);
+        cv::Mat dspec;
+        cv::divSpectrums(res,cv::abs(res),dspec,0);
+        cv::idft(dspec,shift,cv::DFT_REAL_OUTPUT);
         cv::Point pos;
 #ifdef DEBUG
         double minv,maxv;
@@ -185,8 +187,7 @@ private:
             cv::imwrite(std::to_string(n++) + "_b.png",tmp);
         }
 #endif        
-
-        return dft / cv::abs(dft);
+        return dft;
     }
 
     void add_image(cv::Mat img,cv::Point shift)
