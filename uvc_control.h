@@ -9,6 +9,9 @@ typedef struct uvcctl_control_limits {
     float exp_msec_max;
     int wb_temp_min;
     int wb_temp_max;
+    float gamma_min;
+    float gamma_max;
+    float gamma_cur;
 } uvcctl_control_limits;
 
 uvcctl *uvcctl_create();
@@ -18,6 +21,7 @@ void uvcctl_close_fd(int fd);
 int uvcctl_auto_mode(uvcctl *obj,int is_auto);
 int uvcctl_get_control_limits(uvcctl *obj,uvcctl_control_limits *limits);
 int uvcctl_set_gain(uvcctl *obj,double range);
+int uvcctl_set_gamma(uvcctl *obj,double value);
 int uvcctl_set_exposure(uvcctl *obj,double exp_ms);
 int uvcctl_set_wb(uvcctl *obj,int temperature);
 int uvcctl_open(uvcctl *obj,int fd,int *sizes,int n);

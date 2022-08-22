@@ -53,6 +53,16 @@ public:
         make_fft_blur();
     }
 
+    void set_source_gamma(float g)
+    {
+        src_gamma_ = g;
+        darks_corrected_ = false;
+    }
+    void set_target_gamma(float g)
+    {
+        tgt_gamma_ = g;
+    }
+
     void make_fft_blur()
     {
         if(window_size_ == 0)
@@ -75,7 +85,10 @@ public:
     void set_darks(unsigned char *rgb_img)
     {
         has_darks_ = true;
-        darks_ = cv::Mat(sum_.rows,sum_.cols,CV_8UC3,rgb_img).clone();
+        darks_corrected_ = false;
+        cv::Mat src(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
+        src.convertTo(darks_,CV_32FC3,1/255.0);
+
     }
 
     void get_stacked(unsigned char *rgb_img)
@@ -85,16 +98,33 @@ public:
         else {
             cv::Mat tgt(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
             cv::Mat tmp = sum_ / count_;
-            tmp.convertTo(tgt,CV_8UC3);
+            if(tgt_gamma_!=1.0f) {
+                cv::pow(tmp,1/tgt_gamma_,tmp);
+            }
+            tmp.convertTo(tgt,CV_8UC3,255);
         }
     }
 
+
     bool stack_image(unsigned char *rgb_img,bool restart_position = false)
     {
-        cv::Mat frame(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
+        cv::Mat frame8bit(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
+        cv::Mat frame;
+        frame8bit.convertTo(frame,CV_32FC3,1.0/255);
+        if(src_gamma_ != 1.0) {
+            cv::pow(frame,src_gamma_,frame);
+        }
         if(has_darks_) {
-            cv::Mat updated = frame - darks_;
-            frame = updated;
+            if(src_gamma_ != 1.0) { 
+                if(!darks_corrected_) {
+                    darks_corrected_ = true;
+                    cv::pow(darks_,src_gamma_,darks_gamma_corrected_);
+                }
+                frame -= darks_gamma_corrected_;
+            }
+            else {
+                frame = frame - darks_;
+            }
         }
         if(window_size_ == 0) {
             add_image(frame,cv::Point(0,0));
@@ -106,6 +136,7 @@ public:
             add_image(frame,cv::Point(0,0));
             fft_roi_ = calc_fft(frame);
             frames_ = 1;
+            reset_step(cv::Point(0,0));
         }
         else {
             cv::Mat fft_frame = calc_fft(frame);
@@ -120,8 +151,10 @@ public:
                     add_image(frame,shift);
                     frames_ ++;
                 }
-                else
+                else {
+                    LOG("failed registration dx=%d dy=%d\n",shift.x,shift.y);
                     added = false;
+                }
             }
         }
         return added;
@@ -130,10 +163,47 @@ private:
 
     void reset_step(cv::Point p)
     {
+        current_position_ = p;
+        step_sum_sq_ = 0;
+        count_frames_ = 0;
+        missed_frames_ = 0;
     }
     bool check_step(cv::Point p)
     {
-        return true;
+        float dx = current_position_.x - p.x;
+        float dy = current_position_.y - p.y;
+        float step_sq_ = dx*dx + dy*dy;
+        if(count_frames_ == 0) {
+            current_position_ = p;
+            step_sum_sq_ = dx*dx + dy*dy;
+            count_frames_ = 1;
+            missed_frames_ = 0;
+            return true;
+        }
+        else {
+            float step_avg_ = sqrt(step_sum_sq_ / count_frames_);
+            constexpr int missed_in_a_row_limit = 5;
+            constexpr float pixel_0_threshold = 3;
+            float step = sqrt(step_sq_);
+            float step_limit = std::max((2 + (float)sqrt(missed_frames_)) * step_avg_,pixel_0_threshold);
+#ifdef DEBUG            
+            printf("Step size %5.2f from (%d,%d) to (%d,%d) limit =%5.1f avg_step=%5.1f\n",step,
+                    current_position_.x,current_position_.y,
+                    p.x,p.y,
+                    step_limit,step_avg_);
+#endif            
+            if(missed_frames_ > missed_in_a_row_limit || step > step_limit) {
+                missed_frames_ ++;
+                return false;
+            }
+            else {
+                current_position_ = p;
+                count_frames_ ++;
+                step_sum_sq_+=step_sq_;
+                missed_frames_ = 0;
+                return true;
+            }
+        }
     }
 
     int fft_pos(int x)
@@ -154,7 +224,6 @@ private:
 #ifdef DEBUG
         double minv,maxv;
         cv::minMaxLoc(shift,&minv,&maxv,nullptr,&pos);
-        printf("%f %f %d %d\n",minv,maxv,pos.x,pos.y);
         static int n=1;
         cv::Mat a,b;
         a=255*(shift-minv)/(maxv-minv);
@@ -179,7 +248,6 @@ private:
             cv::idft(dft,gray,cv::DFT_REAL_OUTPUT);
             double minv,maxv;
             cv::minMaxLoc(gray,&minv,&maxv);
-            printf("after blur: %f %f\n",minv,maxv);
             gray = (gray - minv)/(maxv-minv)*255;
             cv::Mat tmp;
             gray.convertTo(tmp,CV_8UC1);
@@ -194,7 +262,7 @@ private:
     {
         int dx = shift.x;
         int dy = shift.y;
-        printf("Adding at %d %d\n",dx,dy);
+        LOG("Adding at %d %d\n",dx,dy);
         int width  = (sum_.cols - std::abs(dx));
         int height = (sum_.rows - std::abs(dy));
         cv::Rect src_rect = cv::Rect(std::max(dx,0),std::max(dy,0),width,height);
@@ -206,10 +274,17 @@ private:
     bool has_darks_;
     cv::Mat sum_;
     cv::Mat darks_;
+    cv::Mat darks_gamma_corrected_;
+    bool darks_corrected_ = false;
     cv::Mat count_;
     cv::Mat fft_kern_;
     cv::Mat fft_roi_;
+    cv::Point current_position_;
+    int count_frames_,missed_frames_;
+    float step_sum_sq_;
     int dx_,dy_,window_size_;
+    float src_gamma_ = 1.0f;
+    float tgt_gamma_ = 1.0f;
 public:
     static char error_message_[256];
 };
@@ -226,8 +301,11 @@ void test()
 
     memset(darks,25,sizeof(darks));
 
-    Stacker s(W,H,-1,-1,240);
-    s.set_darks(darks);
+    Stacker s(W,H,-1,-1,64);
+    //s.set_darks(darks);
+
+    s.set_source_gamma(2.2);
+    s.set_target_gamma(2.2);
 
     for(int i=0;i<20;i++) {
         unsigned char *pos = img;
@@ -276,6 +354,27 @@ int main(int argc,char **argv)
         test();
     }
     else {
+        cv::Mat darks;
+        bool has_darks=false;
+        float src_gamma=1.0;
+        float tgt_gamma=1.0;
+        while(argc >= 3 && argv[1][0]=='-') {
+            std::string param=argv[1];
+            if(param == "-d") {
+                darks = cv::imread(argv[2]);
+                has_darks = true;
+            }
+            else if(param == "-g")
+                src_gamma = atof(argv[2]);
+            else if(param == "-G")
+                tgt_gamma = atof(argv[2]);
+            else {
+                printf("Unknown flag %s\n",param.c_str());
+                return 1;
+            }
+            argv+=2;
+            argc-=2;
+        }
         std::vector<cv::Mat> pictures;
         for(int i=1;i<argc;i++) {
             pictures.push_back(cv::imread(argv[i]));
@@ -283,6 +382,17 @@ int main(int argc,char **argv)
         int H=pictures.at(0).rows;
         int W=pictures.at(0).cols;
         Stacker stacker(W,H);
+        if(has_darks) {
+            if(H != darks.rows || W != darks.cols) {
+                printf("Invalid darks size\n");
+                return 1;
+            }
+            stacker.set_darks((unsigned char *)darks.data);
+        }
+        if(src_gamma != 1.0)
+            stacker.set_source_gamma(src_gamma);
+        if(tgt_gamma != 1.0)
+            stacker.set_target_gamma(tgt_gamma);
         /*std::vector<unsigned char> darks(H*W*3);
         make_darks(pictures,darks,W,H);
         stacker.set_darks(darks.data());
@@ -371,6 +481,16 @@ extern "C" {
         }
         catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
         return 0;
+    }
+
+    void stacker_set_src_gamma(Stacker *obj,float gamma)
+    {
+        obj->set_source_gamma(gamma);
+    }
+
+    void stacker_set_tgt_gamma(Stacker *obj,float gamma)
+    {
+        obj->set_target_gamma(gamma);
     }
     char const *stacker_error()
     {

@@ -399,6 +399,14 @@ int uvcctl_get_control_limits(uvcctl *obj,uvcctl_control_limits *limits)
         snprintf(obj->error,ERROR_SIZE,"Failed to get exposure range %s",uvc_strerror(res));
         return -1;
     }
+    uint16_t min_gamma=0,max_gamma=0,cur_gamma=0;
+    if( (res = uvc_get_gamma(obj->devh,&min_gamma,UVC_GET_MIN)) < 0 ||
+        (res = uvc_get_gamma(obj->devh,&cur_gamma,UVC_GET_CUR)) < 0 || 
+        (res = uvc_get_gamma(obj->devh,&max_gamma,UVC_GET_MAX)) < 0)
+    {
+        snprintf(obj->error,ERROR_SIZE,"Failed to get gamma range %s",uvc_strerror(res));
+        return -1;
+    }
     uint16_t min_wb=0,max_wb=0;
     if((res=uvc_get_white_balance_temperature(obj->devh,&min_wb,UVC_GET_MIN)) < 0
         || (res=uvc_get_white_balance_temperature(obj->devh,&max_wb,UVC_GET_MAX)) < 0)
@@ -410,6 +418,18 @@ int uvcctl_get_control_limits(uvcctl *obj,uvcctl_control_limits *limits)
     limits->exp_msec_max = max_time * 0.1f;
     limits->wb_temp_min = min_wb;
     limits->wb_temp_max = max_wb;
+    limits->gamma_min = min_gamma / 100.0f;
+    limits->gamma_cur = cur_gamma / 100.0f;
+    limits->gamma_max = max_gamma / 100.0f;
+    return 0;
+}
+int uvcctl_set_gamma(uvcctl *obj,double value)
+{
+    int res = uvc_set_gamma(obj->devh,(int)(value * 100));
+    if(res < 0) {
+        snprintf(obj->error,ERROR_SIZE,"Failed to set gamma %s",uvc_strerror(res));
+        return -1;
+    }
     return 0;
 }
 

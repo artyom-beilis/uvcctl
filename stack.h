@@ -13,6 +13,8 @@ void stacker_delete(Stacker *obj);
 int stacker_set_darks(Stacker *obj,unsigned char *rgb);
 int stacker_get_stacked(Stacker *obj,unsigned char *rgb);
 int stacker_stack_image(Stacker *obj,unsigned char *rgb,int restart); 
+void stacker_set_src_gamma(Stacker *obj,float gamma);
+void stacker_set_tgt_gamma(Stacker *obj,float gamma);
 
 #if __cplusplus
 }
