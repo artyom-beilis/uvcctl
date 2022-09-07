@@ -7,12 +7,29 @@
 #else
 #define LOG(format, ...) fprintf(stderr,"[%s:%d/%s] " format "\n", basename(__FILE__), __LINE__, __FUNCTION__, ##__VA_ARGS__)
 #endif
+#include <fstream>
 
 #ifdef INCLUDE_MAIN
 #ifdef DO_STACK
 #include <opencv2/imgcodecs.hpp>
+static cv::Mat imreadrgb(std::string const &path)
+{
+    cv::Mat tmp=cv::imread(path);
+    cv::Mat img;
+    cv::cvtColor(tmp,img,cv::COLOR_BGR2RGB);
+    return img;
+}
+
+static void imwritergb(std::string const &path,cv::Mat m)
+{
+    cv::Mat tmp;
+    cv::cvtColor(m,tmp,cv::COLOR_RGB2BGR);
+    cv::imwrite(path,tmp);
+}
+
+
+
 #endif
-#include <fstream>
 #endif
 
 struct Stacker {
@@ -23,6 +40,7 @@ public:
         has_darks_(false)
     {
         error_message_[0]=0;
+        fully_stacked_area_ = cv::Rect(0,0,width,height);
         if(roi_size == -1) {
             window_size_ = std::min(height,width);
             #if 0
@@ -60,7 +78,14 @@ public:
     }
     void set_target_gamma(float g)
     {
-        tgt_gamma_ = g;
+        if(g == -1.0f) {
+            enable_stretch_ = true;
+            tgt_gamma_ = 1.0f;
+        }
+        else {
+            tgt_gamma_ = g;
+            enable_stretch_ = false;
+        }
     }
 
     void make_fft_blur()
@@ -87,21 +112,61 @@ public:
         has_darks_ = true;
         darks_corrected_ = false;
         cv::Mat src(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
-        src.convertTo(darks_,CV_32FC3,1/255.0);
-
+        src.convertTo(darks_,CV_32FC3,1/(255.0));
     }
 
+    void save_stacked_darks(char const *path)
+    {
+        cv::Mat stacked  = sum_ / count_;
+        std::ofstream f(path);
+        if(!f)
+            throw std::runtime_error("Failed to open darks path");
+        if(!f.write((char *)stacked.data,stacked.rows*stacked.cols*sizeof(float)*3))
+            throw std::runtime_error("Failed to save darks");
+    }
+
+    void load_darks(char const *path)
+    {
+        has_darks_ = true;
+        darks_corrected_ = false;
+        darks_ = cv::Mat(sum_.rows,sum_.cols,CV_32FC3); 
+        std::ifstream f(path);
+        if(!f)
+            throw std::runtime_error("Failed to open darks file");
+        f.read((char *)darks_.data,sum_.rows*sum_.cols*sizeof(float)*3);
+        if(!f)
+            throw std::runtime_error("Failed to read darks file");
+    }
     void get_stacked(unsigned char *rgb_img)
     {
         if(frames_ == 0)
             memset(rgb_img,0,sum_.rows*sum_.cols*3);
         else {
             cv::Mat tgt(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
-            cv::Mat tmp = sum_ / count_;
-            if(tgt_gamma_!=1.0f) {
-                cv::pow(tmp,1/tgt_gamma_,tmp);
+            //cv::Mat tmp = sum_ / count_;
+            cv::Mat tmp = sum_ * (1.0/ fully_stacked_count_);
+            if(enable_stretch_) {
+                double scale[3],offset[3],mean=0.5;
+                calc_scale_offset(tmp(fully_stacked_area_),scale,offset,mean);
+                tmp = tmp.mul(cv::Scalar(scale[0],scale[1],scale[2]));
+                tmp += cv::Scalar(offset[0],offset[1],offset[2]);
+                tmp = cv::max(0,cv::min(1,tmp));
+                float g=cv::min(2.2,log(mean)/log(0.25));
+                printf("Mean %f gamma=%f\n",mean,g);
+                cv::pow(tmp,1/g,tmp);
             }
-            tmp.convertTo(tgt,CV_8UC3,255);
+            else {
+                double max_v,min_v;
+                cv::minMaxLoc(tmp,&min_v,&max_v);
+                if(min_v < 0)
+                    min_v = 0;
+                tmp = cv::max(0,(tmp - float(min_v))*float(1.0/(max_v-min_v)));
+                if(tgt_gamma_!=1.0f) {
+                    cv::pow(tmp,1/tgt_gamma_,tmp);
+                }
+            }
+            //tmp.convertTo(tgt,CV_8UC3,scale,offset);
+            tmp.convertTo(tgt,CV_8UC3,255,0);
         }
     }
 
@@ -120,10 +185,10 @@ public:
                     darks_corrected_ = true;
                     cv::pow(darks_,src_gamma_,darks_gamma_corrected_);
                 }
-                frame -= darks_gamma_corrected_;
+                frame = cv::max(frame - darks_gamma_corrected_,0);
             }
             else {
-                frame = frame - darks_;
+                frame = cv::max(frame - darks_,0);
             }
         }
         if(window_size_ == 0) {
@@ -160,6 +225,57 @@ public:
         return added;
     }
 private:
+
+    void calc_scale_offset(cv::Mat img,double scale[3],double offset[3],double &mean)
+    {
+        double minV,maxV;
+        cv::minMaxLoc(img,&minV,&maxV);
+        cv::Mat tmp;
+        if(minV < 0)
+            minV = 0;
+        double a=255.0/(maxV-minV);
+        double b=-minV*a;
+        img.convertTo(tmp,CV_8UC3,a,b);
+        int N=tmp.rows*tmp.cols;
+        unsigned char *p=tmp.data;
+        int counters[256][3]={};
+        for(int i=0;i<N;i++) {
+            for(int j=0;j<3;j++) {
+               counters[*p++][j]++;
+            }
+        }
+        mean = 0;
+        int total=0;
+        for(int color=0;color<3;color++) {
+            int lp=-1,hp=-1;
+            int sum=0;
+            for(int i=0;i<255;i++) {
+                sum+=counters[i][color];
+                if(sum*100.0f/N >= low_per_) {
+                    lp = i;
+                    break;
+                }
+            }
+            sum=N;
+            for(int i=255;i>=0;i--) {
+                sum-=counters[i][color];
+                if(sum*100.0f/N < high_per_) {
+                    hp = i;
+                    break;
+                }
+            }
+            for(int i=lp;i<=hp;i++) {
+                mean += double(i-lp)/(hp-lp) * counters[i][color];
+                total+=counters[i][color];
+            }
+            double L = (maxV*lp + minV*(255-lp))/255;
+            double H = (maxV*hp + minV*(255-hp))/255;
+            scale[color] = 1.0/(H-L);
+            offset[color] = -L*scale[color];
+            printf("Stretch %d:[%f-> %f %f<- %f]\n",color,minV,L,H,maxV);
+        }
+        mean/=total;
+    }
 
     void reset_step(cv::Point p)
     {
@@ -228,7 +344,7 @@ private:
         cv::Mat a,b;
         a=255*(shift-minv)/(maxv-minv);
         a.convertTo(b,CV_8UC1);
-        cv::imwrite(std::to_string(n++) + "_shift.png",b);
+        imwritergb(std::to_string(n++) + "_shift.png",b);
 #else
         cv::minMaxLoc(shift,nullptr,nullptr,nullptr,&pos);
 #endif        
@@ -252,7 +368,7 @@ private:
             cv::Mat tmp;
             gray.convertTo(tmp,CV_8UC1);
             static int n=1;
-            cv::imwrite(std::to_string(n++) + "_b.png",tmp);
+            imwritergb(std::to_string(n++) + "_b.png",tmp);
         }
 #endif        
         return dft;
@@ -269,9 +385,13 @@ private:
         cv::Rect img_rect = cv::Rect(std::max(-dx,0),std::max(-dy,0),width,height);
         cv::Mat(sum_,src_rect) += cv::Mat(img,img_rect);
         cv::Mat(count_,src_rect) += cv::Scalar(1,1,1);
+        fully_stacked_area_ = fully_stacked_area_ & src_rect;
+        fully_stacked_count_++;
     }
     int frames_;
     bool has_darks_;
+    cv::Rect fully_stacked_area_;
+    int fully_stacked_count_ = 0;
     cv::Mat sum_;
     cv::Mat darks_;
     cv::Mat darks_gamma_corrected_;
@@ -285,6 +405,9 @@ private:
     int dx_,dy_,window_size_;
     float src_gamma_ = 1.0f;
     float tgt_gamma_ = 1.0f;
+    bool enable_stretch_ = true;
+    float low_per_= 5.0f;
+    float high_per_=99.9f;
 public:
     static char error_message_[256];
 };
@@ -346,6 +469,7 @@ void make_darks(std::vector<cv::Mat> &pictures,std::vector<unsigned char> &data,
     }
 }
 
+
 #ifdef DO_STACK
 
 int main(int argc,char **argv)
@@ -354,16 +478,24 @@ int main(int argc,char **argv)
         test();
     }
     else {
-        cv::Mat darks;
+        std::string darks_path;
+        std::string save_darks;
         bool has_darks=false;
         float src_gamma=1.0;
         float tgt_gamma=1.0;
+        int roi=-1;
         while(argc >= 3 && argv[1][0]=='-') {
             std::string param=argv[1];
             if(param == "-d") {
-                darks = cv::imread(argv[2]);
+                darks_path=argv[2];
                 has_darks = true;
             }
+            else if(param == "-D") {
+                save_darks = argv[2];
+                roi = 0;
+            }
+            else if(param == "-r")
+                roi = atoi(argv[2]);
             else if(param == "-g")
                 src_gamma = atof(argv[2]);
             else if(param == "-G")
@@ -376,23 +508,38 @@ int main(int argc,char **argv)
             argc-=2;
         }
         std::vector<cv::Mat> pictures;
+        std::vector<bool> restart;
+        bool flag=false;
         for(int i=1;i<argc;i++) {
-            pictures.push_back(cv::imread(argv[i]));
+            if(argv[i]==std::string("restart")) {
+                flag=true;
+                continue;
+            }
+            if(strstr(argv[i],"restart"))
+                flag=true;
+            cv::Mat img = imreadrgb(argv[i]);
+            pictures.push_back(img);
+            restart.push_back(flag);
+            flag=false;
         }
         int H=pictures.at(0).rows;
         int W=pictures.at(0).cols;
-        Stacker stacker(W,H);
+        Stacker stacker(W,H,-1,-1,roi);
         if(has_darks) {
-            if(H != darks.rows || W != darks.cols) {
-                printf("Invalid darks size\n");
-                return 1;
+            if(darks_path.find(".flt")!=std::string::npos) {
+                stacker.load_darks(darks_path.c_str());
             }
-            stacker.set_darks((unsigned char *)darks.data);
+            else {
+                cv::Mat darks = imreadrgb(darks_path);
+                if(H != darks.rows || W != darks.cols) {
+                    printf("Invalid darks size\n");
+                    return 1;
+                }
+                stacker.set_darks((unsigned char *)darks.data);
+            }
         }
-        if(src_gamma != 1.0)
-            stacker.set_source_gamma(src_gamma);
-        if(tgt_gamma != 1.0)
-            stacker.set_target_gamma(tgt_gamma);
+        stacker.set_source_gamma(src_gamma);
+        stacker.set_target_gamma(tgt_gamma);
         /*std::vector<unsigned char> darks(H*W*3);
         make_darks(pictures,darks,W,H);
         stacker.set_darks(darks.data());
@@ -405,14 +552,19 @@ int main(int argc,char **argv)
             if(pictures[i].rows != H || pictures[i].cols != W) {
                 printf("Skipping %d\n",i);
             }
-            stacker.stack_image(pictures[i].data);
+            stacker.stack_image(pictures[i].data,restart[i]);
         }
-        std::vector<unsigned char> data(H*W*3);
-        stacker.get_stacked(data.data());
-        std::ofstream tmp("res.ppm");
-        tmp << "P6\n"<<W<<" " << H << " 255\n";
-        tmp.write((char*)(data.data()),H*W*3);
-        tmp.close();
+        if(save_darks.empty()) {
+            std::vector<unsigned char> data(H*W*3);
+            stacker.get_stacked(data.data());
+            std::ofstream tmp("res.ppm");
+            tmp << "P6\n"<<W<<" " << H << " 255\n";
+            tmp.write((char*)(data.data()),H*W*3);
+            tmp.close();
+        }
+        else {
+            stacker.save_stacked_darks(save_darks.c_str());
+        }
     }
 }
 
@@ -470,6 +622,32 @@ extern "C" {
         }
         catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
     }
+    
+    int stacker_save_stacked_darks(Stacker *obj,char const *path)
+    {
+        try {
+            obj->save_stacked_darks(path);
+        }
+        catch(std::exception const &e) {
+            snprintf(obj->error_message_,sizeof(obj->error_message_),"Failed: %s",e.what());
+            return -1;
+        }
+        catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
+        return 0;
+    }
+    int stacker_load_darks(Stacker *obj,char const *path)
+    {
+        try {
+            obj->load_darks(path);
+        }
+        catch(std::exception const &e) {
+            snprintf(obj->error_message_,sizeof(obj->error_message_),"Failed: %s",e.what());
+            return -1;
+        }
+        catch(...) { strcpy(obj->error_message_,"Unknown exceptiopn"); return -1; }
+        return 0;
+    }
+
     int stacker_get_stacked(Stacker *obj,unsigned char *rgb)
     {
         try {
