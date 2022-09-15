@@ -124,6 +124,12 @@ public:
         if(!f.write((char *)stacked.data,stacked.rows*stacked.cols*sizeof(float)*3))
             throw std::runtime_error("Failed to save darks");
     }
+    void get_stacked_darks(char *buffer)
+    {
+        cv::Mat stacked  = sum_ / count_;
+        cv::Mat res(sum_.cols,sum_.rows,CV_8UC3,buffer);
+        stacked.convertTo(res,CV_8UC3,255);
+    }
 
     void load_darks(char const *path)
     {
@@ -472,6 +478,14 @@ void make_darks(std::vector<cv::Mat> &pictures,std::vector<unsigned char> &data,
 
 #ifdef DO_STACK
 
+void save_ppm(char const *path,void *data,int H,int W)
+{
+    std::ofstream tmp(path);
+    tmp << "P6\n"<<W<<" " << H << " 255\n";
+    tmp.write((char*)(data),H*W*3);
+    tmp.close();
+}
+
 int main(int argc,char **argv)
 {
     if(argc == 1) {
@@ -483,6 +497,7 @@ int main(int argc,char **argv)
         bool has_darks=false;
         float src_gamma=1.0;
         float tgt_gamma=1.0;
+        bool restart_full = false;
         int roi=-1;
         while(argc >= 3 && argv[1][0]=='-') {
             std::string param=argv[1];
@@ -493,6 +508,12 @@ int main(int argc,char **argv)
             else if(param == "-D") {
                 save_darks = argv[2];
                 roi = 0;
+            }
+            else if(param == "-R") {
+                restart_full=true;
+                argc--;
+                argv++;
+                continue;
             }
             else if(param == "-r")
                 roi = atoi(argv[2]);
@@ -507,23 +528,9 @@ int main(int argc,char **argv)
             argv+=2;
             argc-=2;
         }
-        std::vector<cv::Mat> pictures;
-        std::vector<bool> restart;
-        bool flag=false;
-        for(int i=1;i<argc;i++) {
-            if(argv[i]==std::string("restart")) {
-                flag=true;
-                continue;
-            }
-            if(strstr(argv[i],"restart"))
-                flag=true;
-            cv::Mat img = imreadrgb(argv[i]);
-            pictures.push_back(img);
-            restart.push_back(flag);
-            flag=false;
-        }
-        int H=pictures.at(0).rows;
-        int W=pictures.at(0).cols;
+        cv::Mat picture0 = imreadrgb(argv[1]);;
+        int H=picture0.rows;
+        int W=picture0.cols;
         Stacker stacker(W,H,-1,-1,roi);
         if(has_darks) {
             if(darks_path.find(".flt")!=std::string::npos) {
@@ -548,22 +555,35 @@ int main(int argc,char **argv)
             tmp<<"P6\n"<<W<<" " << H << " 255\n";
             tmp.write((char*)darks.data(),3*H*W);
         }*/
-        for(unsigned i=0;i<pictures.size();i++) {
-            if(pictures[i].rows != H || pictures[i].cols != W) {
-                printf("Skipping %d\n",i);
+        bool flag=false;
+        for(int i=2;i<argc;i++) {
+            if(argv[i]==std::string("restart")) {
+                flag=true;
+                continue;
             }
-            stacker.stack_image(pictures[i].data,restart[i]);
+            if(strstr(argv[i],"restart"))
+                flag=true;
+            cv::Mat img = imreadrgb(argv[i]);
+            if(img.rows != H || img.cols != W) {
+                printf("Skipping %s\n",argv[i]);
+                continue;
+            }
+            stacker.stack_image(img.data,flag | restart_full);
+            flag=false;
         }
         if(save_darks.empty()) {
             std::vector<unsigned char> data(H*W*3);
             stacker.get_stacked(data.data());
-            std::ofstream tmp("res.ppm");
-            tmp << "P6\n"<<W<<" " << H << " 255\n";
-            tmp.write((char*)(data.data()),H*W*3);
-            tmp.close();
+            save_ppm("res.ppm",data.data(),H,W);
         }
         else {
-            stacker.save_stacked_darks(save_darks.c_str());
+            if(save_darks.find(".ppm")==save_darks.size() - 4) {
+                std::vector<unsigned char> data(H*W*3);
+                stacker.get_stacked(data.data());
+                save_ppm(save_darks.c_str(),data.data(),H,W);
+            }
+            else
+                stacker.save_stacked_darks(save_darks.c_str());
         }
     }
 }
