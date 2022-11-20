@@ -35,9 +35,10 @@ static void imwritergb(std::string const &path,cv::Mat m)
 struct Stacker {
 public:
 
-    Stacker(int width,int height,int roi_x=-1,int roi_y=-1,int roi_size = -1) : 
+    Stacker(int width,int height,int roi_x=-1,int roi_y=-1,int roi_size = -1,int exp_multiplier=1) : 
         frames_(0),
-        has_darks_(false)
+        has_darks_(false),
+        exp_multiplier_(exp_multiplier)
     {
         error_message_[0]=0;
         fully_stacked_area_ = cv::Rect(0,0,width,height);
@@ -175,15 +176,34 @@ public:
             tmp.convertTo(tgt,CV_8UC3,255,0);
         }
     }
-
-
+    
     bool stack_image(unsigned char *rgb_img,bool restart_position = false)
     {
         cv::Mat frame8bit(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
         cv::Mat frame;
         frame8bit.convertTo(frame,CV_32FC3,1.0/255);
+        return stack_image((float*)(frame.data),restart_position);
+    }
+    bool stack_image(float *rgb_img,bool restart_position = false)
+    {
+        cv::Mat frame_in(sum_.rows,sum_.cols,CV_32FC3,rgb_img);
+        cv::Mat frame = frame_in.clone();
+        if(exp_multiplier_ != 1) {
+            if(manual_exposure_counter_ == 0)
+                manual_frame_ = frame;
+            else
+                manual_frame_ += frame;
+            manual_exposure_counter_++;
+            if(manual_exposure_counter_ < exp_multiplier_)
+                return true;
+            manual_exposure_counter_ = 0;
+            frame = manual_frame_ * (1.0f / exp_multiplier_);
+        }
         if(src_gamma_ != 1.0) {
             cv::pow(frame,src_gamma_,frame);
+        }
+        else {
+            frame = frame_in.clone();
         }
         if(has_darks_) {
             if(src_gamma_ != 1.0) { 
@@ -191,10 +211,12 @@ public:
                     darks_corrected_ = true;
                     cv::pow(darks_,src_gamma_,darks_gamma_corrected_);
                 }
-                frame = cv::max(frame - darks_gamma_corrected_,0);
+                //frame = cv::max(frame - darks_gamma_corrected_,0);
+                frame = frame - darks_gamma_corrected_;
             }
             else {
-                frame = cv::max(frame - darks_,0);
+                //frame = cv::max(frame - darks_,0);
+                frame = frame - darks_;
             }
         }
         if(window_size_ == 0) {
@@ -353,6 +375,25 @@ private:
         imwritergb(std::to_string(n++) + "_shift.png",b);
 #else
         cv::minMaxLoc(shift,nullptr,nullptr,nullptr,&pos);
+        #if 0
+            std::vector<float> vec(shift.cols);
+            for(int r=0;r<shift.rows;r++) {
+                for(int c=0;c<shift.cols;c++) {
+                    vec[r]+=shift.at<float>(r,c);
+                }
+            }
+            int maxp = 0;
+            float maxv = vec[0];
+            for(unsigned i=1;i<vec.size();i++) {
+                if(vec[i] > maxv) {
+                    maxv = vec[i];
+                    maxp=i;
+                }
+            }
+            pos.y = maxp;
+            pos.x = 0;
+            printf("Shift = %d\n",fft_pos(maxp));
+        #endif
 #endif        
         return cv::Point(fft_pos(pos.x),fft_pos(pos.y));
     }
@@ -409,6 +450,9 @@ private:
     int count_frames_,missed_frames_;
     float step_sum_sq_;
     int dx_,dy_,window_size_;
+    int manual_exposure_counter_ = 0;
+    int exp_multiplier_;
+    cv::Mat manual_frame_;
     float src_gamma_ = 1.0f;
     float tgt_gamma_ = 1.0f;
     bool enable_stretch_ = true;
@@ -498,6 +542,7 @@ int main(int argc,char **argv)
         float src_gamma=1.0;
         float tgt_gamma=1.0;
         bool restart_full = false;
+        int mpl = 1;
         int roi=-1;
         while(argc >= 3 && argv[1][0]=='-') {
             std::string param=argv[1];
@@ -517,6 +562,8 @@ int main(int argc,char **argv)
             }
             else if(param == "-r")
                 roi = atoi(argv[2]);
+            else if(param == "-m")
+                mpl = atoi(argv[2]);
             else if(param == "-g")
                 src_gamma = atof(argv[2]);
             else if(param == "-G")
@@ -531,7 +578,7 @@ int main(int argc,char **argv)
         cv::Mat picture0 = imreadrgb(argv[1]);;
         int H=picture0.rows;
         int W=picture0.cols;
-        Stacker stacker(W,H,-1,-1,roi);
+        Stacker stacker(W,H,-1,-1,roi,mpl);
         if(has_darks) {
             if(darks_path.find(".flt")!=std::string::npos) {
                 stacker.load_darks(darks_path.c_str());
