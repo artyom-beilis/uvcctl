@@ -9,6 +9,8 @@
 #endif
 #include <fstream>
 
+#include "rotation.h"
+
 #ifdef INCLUDE_MAIN
 #ifdef DO_STACK
 #include <opencv2/imgcodecs.hpp>
@@ -144,47 +146,63 @@ public:
         if(!f)
             throw std::runtime_error("Failed to read darks file");
     }
+    
+    cv::Mat get_stacked_image()
+    {
+        //cv::Mat tmp = sum_ / count_;
+        cv::Mat tmp = sum_ * (1.0/ fully_stacked_count_);
+        if(enable_stretch_) {
+            double scale[3],offset[3],mean=0.5;
+            calc_scale_offset2(tmp(fully_stacked_area_),scale,offset);
+            tmp = tmp.mul(cv::Scalar(scale[0],scale[1],scale[2]));
+            tmp += cv::Scalar(offset[0],offset[1],offset[2]);
+            tmp = cv::max(0,cv::min(1,tmp));
+            double gscale=1.0;
+            stretch_high_factor(tmp(fully_stacked_area_),gscale,mean);
+            tmp = tmp.mul(cv::Scalar(gscale,gscale,gscale));
+            tmp = cv::min(1,tmp);
+            float g=cv::max(1.0,cv::min(2.2,log(mean)/log(0.25)));
+            printf("Mean %f gamma=%f\n",mean,g);
+            cv::pow(tmp,1/g,tmp);
+        }
+        else {
+            double max_v,min_v;
+            cv::minMaxLoc(tmp,&min_v,&max_v);
+            if(min_v < 0)
+                min_v = 0;
+            tmp = cv::max(0,(tmp - float(min_v))*float(1.0/(max_v-min_v)));
+            if(tgt_gamma_!=1.0f) {
+                cv::pow(tmp,1/tgt_gamma_,tmp);
+            }
+        }
+        return tmp;
+    }
     void get_stacked(unsigned char *rgb_img)
     {
         if(frames_ == 0)
             memset(rgb_img,0,sum_.rows*sum_.cols*3);
         else {
             cv::Mat tgt(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
-            //cv::Mat tmp = sum_ / count_;
-            cv::Mat tmp = sum_ * (1.0/ fully_stacked_count_);
-            if(enable_stretch_) {
-                double scale[3],offset[3],mean=0.5;
-                calc_scale_offset(tmp(fully_stacked_area_),scale,offset,mean);
-                tmp = tmp.mul(cv::Scalar(scale[0],scale[1],scale[2]));
-                tmp += cv::Scalar(offset[0],offset[1],offset[2]);
-                tmp = cv::max(0,cv::min(1,tmp));
-                float g=cv::min(2.2,log(mean)/log(0.25));
-                printf("Mean %f gamma=%f\n",mean,g);
-                cv::pow(tmp,1/g,tmp);
-            }
-            else {
-                double max_v,min_v;
-                cv::minMaxLoc(tmp,&min_v,&max_v);
-                if(min_v < 0)
-                    min_v = 0;
-                tmp = cv::max(0,(tmp - float(min_v))*float(1.0/(max_v-min_v)));
-                if(tgt_gamma_!=1.0f) {
-                    cv::pow(tmp,1/tgt_gamma_,tmp);
-                }
-            }
+            cv::Mat tmp = get_stacked_image();
             //tmp.convertTo(tgt,CV_8UC3,scale,offset);
             tmp.convertTo(tgt,CV_8UC3,255,0);
         }
     }
     
-    bool stack_image(unsigned char *rgb_img,bool restart_position = false)
+    void save_stacked(char const *path)
+    {
+        cv::Mat img = get_stacked_image();
+        cv::imwrite(path,img);
+    }
+    
+    bool stack_image(unsigned char *rgb_img,bool restart_position = false,float rotate=0)
     {
         cv::Mat frame8bit(sum_.rows,sum_.cols,CV_8UC3,rgb_img);
         cv::Mat frame;
         frame8bit.convertTo(frame,CV_32FC3,1.0/255);
-        return stack_image((float*)(frame.data),restart_position);
+        return stack_image((float*)(frame.data),restart_position,rotate);
     }
-    bool stack_image(float *rgb_img,bool restart_position = false)
+    bool stack_image(float *rgb_img,bool restart_position = false,float rotate=0)
     {
         cv::Mat frame_in(sum_.rows,sum_.cols,CV_32FC3,rgb_img);
         cv::Mat frame = frame_in.clone();
@@ -224,6 +242,12 @@ public:
             frames_ ++;
             return true;
         }
+        if(rotate!=0) {
+            auto M = cv::getRotationMatrix2D(cv::Point2f(frame.cols/2,frame.rows/2),rotate,1.0f);
+            cv::Mat frame_rotated;
+            cv::warpAffine(frame,frame_rotated,M,cv::Size(frame.cols,frame.rows));
+            frame = frame_rotated;
+        }
         bool added = true;
         if(frames_ == 0) {
             add_image(frame,cv::Point(0,0));
@@ -253,6 +277,190 @@ public:
         return added;
     }
 private:
+/*
+    void calc_scale_offset2(cv::Mat img,double scale[3],double offset[3],double &mean)
+    {
+        double minV,maxV;
+        cv::minMaxLoc(img,&minV,&maxV);
+        cv::Mat tmp;
+        if(minV < 0)
+            minV = 0;
+        double a=255.0/(maxV-minV);
+        double b=-minV*a;
+        img.convertTo(tmp,CV_8UC3,a,b);
+        int N=tmp.rows*tmp.cols;
+        unsigned char *p=tmp.data;
+        int counters[256][3]={};
+        for(int i=0;i<N;i++) {
+            for(int j=0;j<3;j++) {
+               counters[*p++][j]++;
+            }
+        }
+        int sum=0;
+        int offset_val[3];
+        int top_val[3];
+        int N = img.cols * img.rows;
+        for(int color=0;color<3;color++) {
+            for(int i=0;i<255;i++) {
+                sum+=counters[i][color];
+                if(sum*100.0f/N >= low_per_) {
+                    offset_val[color] = i;
+                    break;
+                }
+            }
+            sum=N;
+            for(int i=255;i>=0;i--) {
+                sum-=counters[i][color];
+                if(sum*100.0f/N < high_per_) {
+                    top_val[color] = i;
+                    break;
+                }
+            }
+        }
+        double meanc[3] = {0,0,0};
+        for(int color=0;color<3;color++) {
+            int sum=0;
+            for(int i=0;i<255;i++) {
+                meanc[color] += counters[i][color] * (255-i);
+                sum += counters[i][color];
+            }
+            meanc[color]/=sum;
+            std::cout << "Mean Color" << color << ":" << meanc[color] <<std::endl;
+        }
+        double max_color = std::max(meanc[0],std::max(meanc[1],meanc[2]));
+        double factors[3] = {max_color / meanc[0],max_color/meanc[1],max_color/meanc[2] };
+
+        mean = 0;
+        int total = 0;
+        for(int color=0;color<3;color++) {
+            if(max_color != meanc[color])
+                continue;
+            int lp=-1,hp=-1;
+            int sum=0;
+            for(int i=0;i<255;i++) {
+                sum+=counters[i][color];
+                if(sum*100.0f/N >= low_per_) {
+                    lp = i;
+                    break;
+                }
+            }
+            sum=N;
+            for(int i=255;i>=0;i--) {
+                sum-=counters[i][color];
+                if(sum*100.0f/N < high_per_) {
+                    hp = i;
+                    break;
+                }
+            }
+            for(int i=lp;i<=hp;i++) {
+                mean += double(i-lp)/(hp-lp) * counters[i][color];
+                total+=counters[i][color];
+            }
+            double L = (maxV*lp + minV*(255-lp))/255;
+            double H = (maxV*hp + minV*(255-hp))/255;
+            for(int c=0;c<3;c++) {
+                scale[c] = 1.0/(H-L) * factors[c];
+                offset[c] = -L*scale[c];
+                printf("Stretch %d:[%f-> %f %f<- %f] factor = %5.3f/%5.3f\n",c,minV,L,H,maxV,scale[c],factors[c]);
+                fflush(stdout);
+            }
+            break;
+        }
+
+        mean/=total;
+    }*/
+    void stretch_high_factor(cv::Mat img,double &scale,double &mean)
+    {
+        cv::Mat tmp;
+        img.convertTo(tmp,CV_8UC3,255,0);
+        int counters[256]={};
+        int N=tmp.rows*tmp.cols;
+        unsigned char *p=tmp.data;
+        for(int i=0;i<N;i++) {
+            unsigned R = *p++;
+            unsigned G = *p++;
+            unsigned B = *p++;
+            unsigned char Y = unsigned(0.3f * R + 0.6f * G + 0.1f * B);
+            counters[Y]++;
+    }
+        int sum=N;
+        int hp=-1;
+        for(int i=255;i>=0;i--) {
+            sum-=counters[i];
+            if(sum*100.0f/N <= high_per_) {
+                hp = i;
+                break;
+            }
+        }
+        scale = 255.0/hp;
+        mean = 0;
+        int total = 0;
+        for(int i=0;i<=hp;i++) {
+            mean += i * counters[i];
+            total += counters[i];
+        }
+        for(int i=hp+1;i<255;i++) {
+            mean += 255 * counters[i];
+            total += counters[i];
+        }
+        mean = mean / (255 * total) * scale;
+        printf("After scale %f mean=%f HP=%d\n",scale,mean,hp);
+    }
+
+    void calc_scale_offset2(cv::Mat img,double scale[3],double offset[3])
+    {
+        double maxV;
+        cv::minMaxLoc(img,nullptr,&maxV);
+        cv::Mat tmp;
+        double a=255.0/maxV;
+        img.convertTo(tmp,CV_8UC3,a,0);
+        int N=tmp.rows*tmp.cols;
+        unsigned char *p=tmp.data;
+        int counters[256][3]={};
+        for(int i=0;i<N;i++) {
+            for(int j=0;j<3;j++) {
+               counters[*p++][j]++;
+            }
+        }
+        int loffset[3];
+        double min_factor=1.0;
+        for(int color=0;color<3;color++) {
+            int lp=-1,hp=-1;
+            int sum=0;
+            for(int i=0;i<255;i++) {
+                sum+=counters[i][color];
+                if(sum*100.0f/N >= low_per_) {
+                    lp = i;
+                    break;
+                }
+            }
+            loffset[color]=lp;
+            min_factor=std::max(min_factor,255.0 / (255 - lp));
+        }
+        double meanv[3]={0,0,0};
+        double maxmean = 0;
+        for(int color=0;color<3;color++) {
+            int lp = loffset[color];
+            int total=0;
+            for(int i=lp;i<255;i++) {
+                meanv[color] += double(i-lp) * counters[i][color];
+                total+=counters[i][color];
+            }
+            meanv[color]/=total;
+            maxmean=std::max(meanv[color],maxmean);
+            printf("mean %f[%d] %d\n",meanv[color],color,lp);
+        }
+        double wb_factor[3];
+        for(int color=0;color<3;color++) {
+            wb_factor[color] = maxmean/meanv[color]*min_factor; 
+            int lp = loffset[color];
+            double L = maxV*lp/255;
+            scale[color] = 1.0/maxV * wb_factor[color];
+            offset[color] = -L * scale[color];
+            meanv[color] = meanv[color] / 255  * scale[color];
+        }
+        printf("(%f,%f,%f)*p - (%f,%f,%f)\n",scale[0],scale[1],scale[2],offset[0],offset[1],offset[2]);
+    }
 
     void calc_scale_offset(cv::Mat img,double scale[3],double offset[3],double &mean)
     {
@@ -456,8 +664,10 @@ private:
     float src_gamma_ = 1.0f;
     float tgt_gamma_ = 1.0f;
     bool enable_stretch_ = true;
-    float low_per_= 5.0f;
-    float high_per_=99.9f;
+    float low_per_= 0.5f;
+    float high_per_=99.999f;
+    //float low_per_= 5.0f;
+    //float high_per_=99.99f;
 public:
     static char error_message_[256];
 };
@@ -522,6 +732,17 @@ void make_darks(std::vector<cv::Mat> &pictures,std::vector<unsigned char> &data,
 
 #ifdef DO_STACK
 
+double parse_time(char *msg)
+{
+    struct tm tm_stamp;
+    strptime(msg, "%Y%m%d%H%M%S", &tm_stamp);
+    time_t at= timelocal(&tm_stamp);
+    char buf[256];
+    strftime(buf,sizeof(buf),"%Y-%m-%d %H:%M:%S",localtime(&at));
+    std::cout << "Derotation from " << buf << std::endl;
+    return at;
+}
+
 void save_ppm(char const *path,void *data,int H,int W)
 {
     std::ofstream tmp(path);
@@ -538,9 +759,15 @@ int main(int argc,char **argv)
     else {
         std::string darks_path;
         std::string save_darks;
+        std::string output;
         bool has_darks=false;
         float src_gamma=1.0;
         float tgt_gamma=1.0;
+        float lat_d=0,lon_d=0;
+        float RAd=0,DEd=0;
+        double start_time = 0;
+        double duration = 0;
+        bool inverse = false;
         bool restart_full = false;
         int mpl = 1;
         int roi=-1;
@@ -560,6 +787,22 @@ int main(int argc,char **argv)
                 argv++;
                 continue;
             }
+            else if(param == "-o")
+                output = argv[2];
+            else if(param == "--lat")
+                lat_d = atof(argv[2]);
+            else if(param == "--lon")
+                lon_d = atof(argv[2]);
+            else if(param == "--RA")
+                RAd = atof(argv[2]);
+            else if(param == "--DE")
+                DEd = atof(argv[2]);
+            else if(param == "--time")
+                start_time = parse_time(argv[2]);
+            else if(param == "--duration")
+                duration = atof(argv[2]);
+            else if(param == "--inverse")
+                inverse = atoi(argv[2]);
             else if(param == "-r")
                 roi = atoi(argv[2]);
             else if(param == "-m")
@@ -578,6 +821,7 @@ int main(int argc,char **argv)
         cv::Mat picture0 = imreadrgb(argv[1]);;
         int H=picture0.rows;
         int W=picture0.cols;
+        Derotator dr(lat_d,lon_d);
         Stacker stacker(W,H,-1,-1,roi,mpl);
         if(has_darks) {
             if(darks_path.find(".flt")!=std::string::npos) {
@@ -615,13 +859,26 @@ int main(int argc,char **argv)
                 printf("Skipping %s\n",argv[i]);
                 continue;
             }
-            stacker.stack_image(img.data,flag | restart_full);
+            float angle = 0;
+            if(start_time != 0) {
+                double ts = (duration * (i-2))/(argc-4) + start_time;
+                angle = dr.getAngleDeg(RAd,DEd,start_time,ts);
+                if(inverse)
+                    angle = -angle;
+                std::cout << "Angle:" <<angle << std::endl;
+            }
+            stacker.stack_image(img.data,flag | restart_full,angle);
             flag=false;
         }
         if(save_darks.empty()) {
-            std::vector<unsigned char> data(H*W*3);
-            stacker.get_stacked(data.data());
-            save_ppm("res.ppm",data.data(),H,W);
+            if(output.empty()) {
+                std::vector<unsigned char> data(H*W*3);
+                stacker.get_stacked(data.data());
+                save_ppm("res.ppm",data.data(),H,W);
+            }
+            else {
+                stacker.save_stacked(output.c_str());
+            }
         }
         else {
             if(save_darks.find(".ppm")==save_darks.size() - 4) {
